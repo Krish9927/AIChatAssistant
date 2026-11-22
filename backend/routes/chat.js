@@ -54,7 +54,7 @@ router.post('/stream', async (req, res) => {
     const systemPrompt = TONE_PROMPTS[tone] || TONE_PROMPTS.professional;
 
     const model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       systemInstruction: systemPrompt,
     });
 
@@ -85,7 +85,7 @@ router.post('/stream', async (req, res) => {
     // Auto-title: generate a short title from the first user message
     if (conversation.messages.filter((m) => m.role === 'user').length === 1) {
       const titleModel = genAI.getGenerativeModel({
-        model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+        model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       });
       const titleResult = await titleModel.generateContent(
         `Generate a short, descriptive title (max 6 words) for a conversation that starts with the following user message. Return only the title, no punctuation.\n\n${message}`
@@ -143,7 +143,7 @@ router.post('/regenerate', async (req, res) => {
     const systemPrompt = TONE_PROMPTS[tone] || TONE_PROMPTS.professional;
 
     const model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       systemInstruction: systemPrompt,
     });
 
