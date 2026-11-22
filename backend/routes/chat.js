@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import Conversation from '../models/Conversation.js';
 
 const router = Router();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ── Tone → System Instruction Map ────────────────────────
 const TONE_PROMPTS = {
@@ -15,8 +15,17 @@ const TONE_PROMPTS = {
     'You are a concise AI assistant. Respond in as few words as possible while still being accurate and helpful. Avoid any unnecessary explanation.',
 };
 
+// ── Build Gemini chat history from stored messages ────────
+// Gemini expects: [{ role: 'user'|'model', parts: [{ text }] }]
+// The system prompt is passed separately as systemInstruction.
+function buildGeminiHistory(messages) {
+  return messages.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+}
+
 // ── POST /api/chat/stream ─────────────────────────────────
-// Streams an AI response back using Server-Sent Events (SSE)
 router.post('/stream', async (req, res) => {
   const { conversationId, message, tone = 'professional' } = req.body;
 
@@ -34,39 +43,38 @@ router.post('/stream', async (req, res) => {
       conversation = new Conversation({ tone });
     }
 
-    // Update tone if changed
     conversation.tone = tone;
-
-    // Append the user message
     conversation.messages.push({ role: 'user', content: message });
 
-    // Build the message array for OpenAI
-    const systemPrompt = TONE_PROMPTS[tone] || TONE_PROMPTS.professional;
-    const openAiMessages = [
-      { role: 'system', content: systemPrompt },
-      ...conversation.messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
+    // Build history excluding the latest user message (sent separately)
+    const history = buildGeminiHistory(
+      conversation.messages.slice(0, -1)
+    );
 
-    // ── SSE Headers ──────────────────────────────────────
+    const systemPrompt = TONE_PROMPTS[tone] || TONE_PROMPTS.professional;
+
+    const model = genAI.getGenerativeModel({
+      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      systemInstruction: systemPrompt,
+    });
+
+    const chat = model.startChat({ history });
+
+    // ── SSE Headers ───────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
 
-    // ── OpenAI Streaming ──────────────────────────────────
-    const stream = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      messages: openAiMessages,
-      stream: true,
-    });
+    // ── Gemini Streaming ──────────────────────────────────
+    const result = await chat.sendMessageStream(message);
 
     let fullResponse = '';
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta?.content || '';
+    for await (const chunk of result.stream) {
+      const delta = chunk.text();
       if (delta) {
         fullResponse += delta;
-        // Send each token as an SSE event
         res.write(`data: ${JSON.stringify({ delta })}\n\n`);
       }
     }
@@ -74,27 +82,20 @@ router.post('/stream', async (req, res) => {
     // ── Persist assistant reply ───────────────────────────
     conversation.messages.push({ role: 'assistant', content: fullResponse });
 
-    // Auto-title: generate a short title from the first user message (Bonus Feature)
+    // Auto-title: generate a short title from the first user message
     if (conversation.messages.filter((m) => m.role === 'user').length === 1) {
-      const titleRes = await openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Generate a short, descriptive title (max 6 words) for a conversation that starts with the following user message. Return only the title, no punctuation.',
-          },
-          { role: 'user', content: message },
-        ],
-        max_tokens: 20,
+      const titleModel = genAI.getGenerativeModel({
+        model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
       });
+      const titleResult = await titleModel.generateContent(
+        `Generate a short, descriptive title (max 6 words) for a conversation that starts with the following user message. Return only the title, no punctuation.\n\n${message}`
+      );
       conversation.title =
-        titleRes.choices[0]?.message?.content?.trim() || 'New Conversation';
+        titleResult.response.text().trim() || 'New Conversation';
     }
 
     await conversation.save();
 
-    // Send the final event with conversationId and title
     res.write(
       `data: ${JSON.stringify({
         done: true,
@@ -111,7 +112,6 @@ router.post('/stream', async (req, res) => {
 });
 
 // ── POST /api/chat/regenerate ─────────────────────────────
-// Regenerates the last AI response (Bonus Feature)
 router.post('/regenerate', async (req, res) => {
   const { conversationId, tone = 'professional' } = req.body;
 
@@ -125,17 +125,29 @@ router.post('/regenerate', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found.' });
     }
 
-    // Remove last assistant message so we can regenerate it
+    // Remove the last assistant message so we regenerate it
     const lastMsg = conversation.messages[conversation.messages.length - 1];
     if (lastMsg?.role === 'assistant') {
       conversation.messages.pop();
     }
 
+    // The last remaining message should be the user prompt to regenerate from
+    const lastUserMsg =
+      [...conversation.messages].reverse().find((m) => m.role === 'user')
+        ?.content || '';
+
+    const history = buildGeminiHistory(
+      conversation.messages.slice(0, -1)
+    );
+
     const systemPrompt = TONE_PROMPTS[tone] || TONE_PROMPTS.professional;
-    const openAiMessages = [
-      { role: 'system', content: systemPrompt },
-      ...conversation.messages.map((m) => ({ role: m.role, content: m.content })),
-    ];
+
+    const model = genAI.getGenerativeModel({
+      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      systemInstruction: systemPrompt,
+    });
+
+    const chat = model.startChat({ history });
 
     // SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
@@ -143,16 +155,12 @@ router.post('/regenerate', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
 
-    const stream = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      messages: openAiMessages,
-      stream: true,
-    });
+    const result = await chat.sendMessageStream(lastUserMsg);
 
     let fullResponse = '';
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta?.content || '';
+    for await (const chunk of result.stream) {
+      const delta = chunk.text();
       if (delta) {
         fullResponse += delta;
         res.write(`data: ${JSON.stringify({ delta })}\n\n`);
