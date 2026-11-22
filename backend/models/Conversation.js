@@ -1,5 +1,6 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 
+// Sub-schema for individual messages inside a conversation
 const MessageSchema = new mongoose.Schema({
   role: {
     type: String,
@@ -16,17 +17,22 @@ const MessageSchema = new mongoose.Schema({
   },
 });
 
+// Main conversation schema
 const ConversationSchema = new mongoose.Schema(
   {
+    // Auto-generated title from first message (Bonus Feature)
     title: {
       type: String,
       default: 'New Conversation',
+      trim: true,
     },
+    // Tone Toggle — stored so the sidebar can restore context
     tone: {
       type: String,
       enum: ['professional', 'casual', 'concise'],
       default: 'professional',
     },
+    // All messages in this thread
     messages: [MessageSchema],
   },
   {
@@ -34,4 +40,4 @@ const ConversationSchema = new mongoose.Schema(
   }
 );
 
-module.exports = mongoose.model('Conversation', ConversationSchema);
+export default mongoose.model('Conversation', ConversationSchema);
